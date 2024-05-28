@@ -1,0 +1,668 @@
+---
+title: "Board Game Popularity"
+author: "Crazy Eights - Kate, Bella, Daniel, Shreyans"
+date: "December 1, 2023"
+format: pdf
+execute: 
+  warning: false
+  message: false
+  echo: false
+editor: visual
+---
+
+```{r}
+#| message: false
+#| label: load-pkg-data
+library(tidyverse)
+library(tidymodels)
+library(patchwork)
+library(knitr)
+library(ggcorrplot)
+library(rms)
+
+games = read_csv("data/games.csv")
+mechanics = read_csv("data/mechanics.csv")
+ratings_distribution = read_csv("data/ratings_distribution.csv")
+subcategories = read_csv("data/subcategories.csv")
+themes = read_csv("data/themes.csv")
+```
+
+```{r}
+#| label: prep_data
+#| warning: false
+games <- games |>
+  select(-c("ComAgeRec", "Description", "GoodPlayers", "LanguageEase", "BestPlayers",
+            "GoodPlayers", "NumWeightVotes", "ComMinPlaytime", "ComMaxPlaytime",
+            "NumUserRatings",	"NumComments", "NumAlternates", "NumExpansions",
+            "NumImplementations", "IsReimplementation", "Family", "Kickstarted",
+            "ImagePath"), -contains("Rank"), -contains("Cat"), "Rank:boardgame")
+
+sub_cats_table <- subcategories |> select(-c("BGGId")) |> 
+  summarise(across(everything(), sum)) |>
+  pivot_longer(cols = everything(),
+               names_to = "Subcategory",
+               values_to = "Count") |>
+  arrange(desc(Count)) |> head(5) 
+
+sub_cats <- sub_cats_table |> pull("Subcategory") 
+
+subcategories <- subcategories |>
+  select(c("BGGId", sub_cats)) |>
+  filter(rowSums(across(all_of(sub_cats))) == 1)
+
+tms_table <- themes |> select(-c("BGGId")) |> 
+  summarise(across(everything(), sum)) |>
+  pivot_longer(cols = everything(),
+               names_to = "Theme",
+               values_to = "Count") |>
+  arrange(desc(Count)) |> head(5) 
+
+tms <- tms_table |> pull("Theme")
+
+themes <- themes |>
+  select(c("BGGId", tms)) |>
+  filter(rowSums(across(all_of(tms))) == 1)
+
+games <- games |> inner_join(subcategories, by = join_by(BGGId)) |> 
+  inner_join(themes, by = join_by(BGGId)) |> drop_na()
+```
+
+```{r}
+#| label: rename_cols
+
+games <- games |>
+  filter(MaxPlayers <= 16)
+
+games <- games |>
+  rename(Rank = `Rank:boardgame`,
+         CatCardGame = `Card Game`,
+         CatMiniatures = Miniatures,
+         CatExploration = Exploration,
+         CatPuzzle = Puzzle,
+         CatPrintPlay = `Print & Play`,
+         ThmFantasy = Fantasy,
+         ThmSciFi = `Science Fiction`,
+         ThmFighting = Fighting,
+         ThmEconomic = Economic,
+         ThmAnimals = Animals)
+
+games <- games |>
+mutate(Theme = case_when(ThmFantasy == 1 ~ "Fantasy",
+                         ThmSciFi == 1 ~ "SciFi",
+                         ThmFighting == 1 ~ "Fighting",
+                         ThmEconomic == 1 ~ "Economic",
+                         ThmAnimals == 1 ~ "Animals"))
+
+games <- games |>
+  mutate(Category = case_when(CatCardGame == 1 ~ "Card Game",
+                              CatMiniatures == 1 ~ "Miniatures",
+                              CatExploration == 1 ~ "Exploration",
+                              CatPuzzle == 1 ~ "Puzzle",
+                              CatPrintPlay == 1 ~ "Print & Play"))
+
+games$Theme <- factor(games$Theme, levels = c("Fantasy", "SciFi", "Animals", 
+                                              "Fighting", "Economic"))
+
+games$Category <- factor(games$Category, levels = c("Miniatures", "Exploration",
+                                                    "Print & Play", "Puzzle", 
+                                                    "Card Game"))
+
+```
+
+```{r}
+games <- games |>
+  mutate(across(c("MaxPlayers", "MfgPlaytime"), ~ na_if(., 0))) |>
+  mutate(across(MaxPlayers, ~replace_na(., mean(., na.rm = TRUE)))) |>
+  mutate(across(MfgPlaytime, ~replace_na(., mean(., na.rm = TRUE))))
+```
+
+## Introduction
+
+In an increasingly digital world, board games have facilitated a renewed interest in face-to-face communication, serving as a common human leisure activity that combines entertainment, social interaction, and intellectual challenge. In a 2018 study, Gonzalo-Iglesia and colleagues examined how Spanish students in Communication and Biochemistry studies engaged with commercial board games and discovered that engaging with board games promoted learning, communication, decision-making, and teamwork (Gonzalo-Iglesia et al., 2018).
+
+Having understood the benefits of board games as a learning tool and beyond, the motivation for our research question originates from the rapidly increasing sales of board games, as enthusiasts often find themselves navigating through an abundance of unique gaming choices. This led us to wonder: If a person walks through an aisle of board games, what catches his or her attention first? More importantly, what makes a board game successful and enjoyable? How do various factors influence a game's reception among players? 
+
+In this analysis, we will focus on a singular broad research question: What qualities constitute a good board game? We'll be looking at elements like game themes, categories, mechanics, popularity, and game structure where a higher average ranking denotes a better board game (i.e. Monopoly, Uno, Puzzles).
+
+Before our exploratory data analysis, we crafted some hypotheses based on the context of board games. (1) Games that are owned more and have lower ranks will have a positive relationship with average user rating because popularity typically increases rating. (2) Board games from the fighting theme may have a positive relationship with average user rating because of dedicated fan bases. (3) While different players might prefer more different levels of difficulty, we hypothesize that difficult games will have a negative relationship with average user rating, on average, because it takes away from the fun and leisureness of board games.
+
+The goal is to provide insights that can help both gamers and game creators navigate the world of board games more effectively.
+
+## Data description
+
+This board games dataset involves data collected from BoardGameGeek(BGG), an online board game forum and database that stores information and ratings for over 125,600 different board games. The data was originally collected by web-scraping BGG's website using BGG's XML API, but it was sourced from Kaggle for the purpose of this analysis.
+
+The initial board games data was split among several different files, but through data cleaning, merging, and variable selection, we reduced the size of the data significantly \[see Section 3: EDA\]. The final games dataset we use in our analysis has 1878 observations and 28 columns where 2 columns are identifiers (BBGid and name). There are characteristics that describe the structure of the game such as number of players, recommended time to play, and recommended age that are determined by the game designers. There are also more subjective characteristics that reflect the public opinion of each board game such as number of games owned/wanted, average rating, difficulty level, and average rank. Lastly, we also have a set of categorical variables that highlight what theme and subcategory each board game belongs to which gives more insight into the type of game and intended audience.
+
+## Initial exploratory data analysis
+
+We performed a lot of data wrangling in order to prepare our data for exploratory data analysis and modeling. We started with three separate datasets (games, themes, subcategory) where the "games" dataset was our target dataset we wanted to tidy/merge to based on "BGGid". Our methodology is detailed below:
+
+1.  To remove the number of dimensions and reduce future model bias from underrepresented categories and themes, we decided to only include board games in the top five populated themes and categories from each dataset. In order to make categorical distinctions more clear, we also removed all board games that belonged to multiple categories. Some underrepresented categories include Word Games and Territory Building and some removed themes include Medical and Sports. While it would have been nice to include these, we wanted to focus on a subset of data (see Limitations).
+2.  We performed an inner-join to merge all three datasets. Columns were renamed to remove spacing and special characters.
+3.  We noticed that many observations for MaxPlayers and MfgPlaytime were zero, but it did not seem reasonable for these parameters to be 0 players and 0 minutes, respectively, in the context of board games. We concluded that the 0's may have been used as the default if no data was provided. Therefore, we performed imputation to set the 0 values to the mean of the column (of all non-zero values).
+4.  Since our themes and categories were represented as indicator variables, we created a new factor column for each that classified each board game to aid in graphing.
+
+**Distribution AvgRating (response), log of NumOwned (quantitative variable), Theme (categorical variable), GameWeight (quantitative variable)**
+
+```{r}
+#| message: false
+#| fig.width: 8
+#| fit.height: 7
+#| warning: false
+
+avg_rating_hist <- games |>
+  ggplot(aes(x = AvgRating)) +
+  geom_histogram() +
+  labs(x = "Average Rating of Game",
+       y = "Count",
+       title = "Distribution of Average Rating of Game") +
+  theme_gray(base_size = 8) +
+  theme(plot.title = element_text(size = 12))
+
+num_owned_hist <- games |>
+  ggplot(aes(x = log(NumOwned))) +
+  geom_histogram() +
+  labs(x = "Log Number of Games Owned",
+       y = "Count",
+       title = "Distribution of Log of Number Owned") +
+  theme_gray(base_size = 8) +
+  theme(plot.title = element_text(size = 12))
+
+tms_bar <- games |>
+  ggplot(aes(x = Theme)) +
+  geom_bar() +
+  labs(title = "Distribution of Game Themes", y = "Count") +
+  theme_gray(base_size = 8) +
+  theme(plot.title = element_text(size = 12))
+
+game_weight_hist <- games |>
+  ggplot(aes(x = GameWeight)) +
+  geom_histogram(bins = 15) +
+  labs(x = "Game Weight",
+       y = "Count",
+       title = "Distribution of Game Weight (difficulty)")
+
+(avg_rating_hist + num_owned_hist) / (tms_bar + game_weight_hist)
+```
+
+The distribution of Theme shows that the most popular game type is Fantasy by a significant margin. There at least 200 more Fantasy games than the next most popular game theme of Science Fiction.
+
+**Summary Statistics for Histogram of Average Rating**
+
+```{r}
+#| label: summary-stats-avgrating
+
+#summary stats for AvgRating
+games |>
+  summarise(mean = mean(AvgRating),
+            sd = sd(AvgRating),
+            q0 = quantile(AvgRating, 0),
+            q25 = quantile(AvgRating, 0.25),
+            median = median(AvgRating),
+            q75 = quantile(AvgRating, 0.75),
+            q100 = quantile(AvgRating, 1),
+            range = max(AvgRating) - min(AvgRating)) |>
+  kable(digits = 3)
+
+```
+
+The distribution of AvgRating is approximately normal and unimodal. Thus, the best measure of the center is the mean, which is 6.639 points, and the standard deviation of 0.844 indicates that there is little variability in the data. There are no outliers shown in the histogram.
+
+The distribution of NumOwned was highly right skewed with a lot of points near 0, so we decided to take the log transformation. The distribution of the log of NumOwned is approximately normal and unimodal. Thus, the best measure of the center is the mean, which is 6.497 points. The standard deviation of 1.479 indicates that there is a moderate amount of variability in the data. There are no outliers shown in the histogram. \[see Appendix for summary stats\]
+
+The distribution of GameWeight is slightly right-skewed, so the best measure of the center is the median, which is a difficulty of 2. The best measure of the spread of 50% of the data is the IQR of 1, suggesting there is some moderate variability in the data. There is an interesting shape to the distribution because there are not any observations between 0 and 1, while there are many observations between 1 and 5. \[see Appendix for summary stats\]
+
+**Plots of Response Variable and Predictor Variables**
+
+```{r}
+#| fig.width: 8
+#| fig.height: 3
+
+rating_owned_plot <- games |>
+  ggplot(aes(x = log(NumOwned), y = AvgRating)) +
+  geom_point(alpha = 0.5) +
+  labs(x = "Log of Number of Games Owned", y = "Average Rating",
+       title = "Average Rating vs. Log(NumOwned)")
+
+rating_tms_plot <- games |>
+  ggplot(aes(x = Theme, y = AvgRating)) +
+  geom_boxplot() +
+  labs(x = "Game Theme", y = "Average Rating",
+       title = "Distribution of Average Rating by Theme")
+
+rating_owned_plot + rating_tms_plot
+```
+
+When plotting the number of games owned (continuous predictor) with the average user rating (response), we used a log transformation again. We can observe a moderate, positive, linear relationship between the log of number of games owned and user rating. However, there is a cluster on the top left, which suggests that the effect of the number of games owned on user rating is stronger when the number is very high.
+
+When plotting the board game themes (categorical predictor) against the average user rating (response), we can observe that the median of average user rating for all themes fall between 6 and 7 with Fantasy, Scifi, and Economic themes above the 6.5 mark. Ranges and IQRs are pretty consistent as ratings typically fall between 5-9 with 50% of ratings in each theme within 0.75 points off the median. There are a few board game outliers with significantly lower ratings in each theme.
+
+**Visualizations of Potential Interaction Effects**
+
+```{r}
+#| fig.width: 8
+#| fig.height: 3
+
+players_cat_plot <- games |>
+  ggplot(aes(x = MaxPlayers, y = AvgRating, color = Category)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = F) +
+  labs(x = "Maximum Number of Players", y = "Average Rating",
+       title = "Average Rating vs. Maximum Players by Category") +
+  scale_fill_brewer(palette = "Dark2")
+
+players_cat_plot
+```
+
+In the plot, we wanted to visualize how the category would affect the maximum number of players because if the category was too difficult to play with multiple people, then the average rating would decrease. Therefore, we want to quantify effect of category on the relationship between the maximum number of players and average rating. The differing slopes for Category suggest that there could be a significant interaction effect between MaxPlayers and Category.
+
+**Correlation Matrix**
+
+We can use the correlation matrix \[see Appendix\] to help motivate what variables we add to the model and check for multicollinearity. Based on the matrix above, AvgRating seems to have a relationship with Rank and GameWeight. In addition, there are moderate correlations between Rank x NumOwned, GameWeight x Playtime, and NumOwned x NumWant x NumWish.
+
+## Methodology
+
+```{r}
+calc_model_stats <- function(x) {
+  glance(extract_fit_parsnip(x)) |>
+    select(adj.r.squared, AIC, BIC)
+}
+```
+
+```{r}
+set.seed (8)
+games_split <- initial_split(games, prop = 0.75)
+games_train <- training(games_split)
+games_test <- testing(games_split)
+
+set.seed(8)
+folds <- vfold_cv(games_train, v = 12)
+games_spec <- linear_reg() |>
+  set_engine("lm")
+
+games_rec1 <- recipe(AvgRating ~  NumOwned +  
+                        Rank,
+                        data = games_train) |>
+  step_mutate(Rank = Rank/100) |>
+  step_mutate(logNumOwned = log(NumOwned)) |>
+  step_rm(NumOwned) |>
+  step_center(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+games_rec2 <- recipe(AvgRating ~ Category + Theme + NumOwned + 
+                       GameWeight + Rank + MaxPlayers,
+                        data = games_train) |>
+  step_mutate(Rank = Rank/100) |>
+  step_mutate(logNumOwned = log(NumOwned)) |>
+  step_rm(NumOwned) |>
+  step_interact(terms =~ MaxPlayers:starts_with("Category")) |>
+  step_center(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+games_wflow1 <- workflow() |>
+  add_model(games_spec) |> 
+  add_recipe(games_rec1)
+
+games_wflow2 <- workflow() |>
+  add_model(games_spec) |> 
+  add_recipe(games_rec2)
+
+games_fit1 <- games_wflow1 |>
+  fit(games_train)
+
+games_fit2 <- games_wflow2 |>
+  fit(games_train)
+
+games_rec3 <- recipe(AvgRating ~ Category + Theme + NumOwned + 
+                       GameWeight + Rank + MaxPlayers,
+                        data = games_train) |>
+  step_mutate(Rank = Rank/100) |>
+  step_mutate(logNumOwned = log(NumOwned)) |>
+  step_rm(NumOwned) |>
+  step_center(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+games_wflow3 <- workflow() |>
+  add_model(games_spec) |> 
+  add_recipe(games_rec3)
+
+games_fit3 <- games_wflow3 |>
+  fit(games_train)
+```
+
+We are using a multiple linear regression model because we have multiple predictors and the response variable of our model, AvgRating, is a continuous value.
+
+**Creating a Baseline Model (Model 1):** When we are considering the baseline for the rating of a certain board game, we are looking at classic hallmarks of success such as popularity i.e. number of sales and the rank that board game critics may give a game. Based on the information provided by BGG, how the values of Rank were determined is unclear, however we believe there is a relationship between AvgRating and Rank, so we included it in the model.
+
+```{r}
+tidy(games_fit1) |>
+  kable(digits = 3)
+```
+
+**Breaking Down the Recipe 1:** Just as we logged the NumOwned variable in our EDA, we decided to apply a log transformation to create logNumOwned. Following this, we also removed the original NumOwned predictor from the model.
+
+We also decided to step_mutate and scale the rank down by 100. This was motivated by the fact that the rank variable had a much larger range (9 to 21,926) than our avgRating response variable (1 to 10), making the coefficient too small to interpret without re-scaling. Mean-centering was also used so we can better interpret the intercept and reduce VIF.
+
+**Creating a Second Model (Model 2):** Analysis of the correlation matrix helped us to figure out which predictors would have the greatest correlation with the average rating of a board game. We created a model built off of the baseline model that adds the top 5 Themes, top 5 Categories, GameWeight, and MaxPlayers.
+
+The top 5 themes and categories were selected because they would have the greatest impact on the rating of a game. Analyzing every single theme and category available would create too many levels and minimize the impact of each level.
+
+The difficulty of the game was added because we believed that the difficulty would have an impact on how the user enjoys the game. If the difficulty is too high, the game may not be enjoyable for the consumer and the average rating may be lowered. In addition, our correlation matrix confirmed this relationship. The maximum number of players was added because we believed that the rating of a game may be lowered if people felt that the maximum number of players for the game was too limiting.
+
+**Breaking Down the Recipe 2:** Based on our EDA, we decided to add an interaction term between game Category and MaxPlayers because the difference in the slopes may be statistically significant.
+
+```{r}
+tidy(games_fit2) |>
+  kable(digits = 3)
+```
+
+**Creating a Third Model (Model 3):** In this model, we got rid of the interaction effect between MaxPlayers and Category to check if the interaction effect is actually useful. We observed that the slopes, while different, may not be statistically significant. Additionally, when analyzing the output of model 2, the p-values for all but one of the coefficients in the interaction term between MaxPlayers and Category were very high.
+
+```{r}
+tidy(games_fit3) |>
+  kable(digits = 3)
+```
+
+**Cross Validation and Model Selection:** Based on the size of our training set (n = 1828), we performed 12-fold cross-validation on each model using the training data. Across the 12 folds, the average RMSE for the three models were 0.674, 0.643, and 0.642, respectively \[see Appendix\]. The slightly lower RMSE value indicates that the third model is a better fit for the data than the first two. The average $R^2$ for the three models were 0.443, 0.492, and 0.494, respectively \[see Appendix\]. This indicates that the third model explains more variation in the data, so the third model is the best predictor of AvgRating. We also calculated the adjusted $R^2$, AIC, and BIC values for each model on the training data to confirm our results. While the adjusted $R^2$ value is slightly lower for the third model than the second model, the AIC and BIC values are lower for the third model. Moreover, when analyzing the VIF of model 2, we observed multiple predictors to be highly correlated with each other (VIF \> 10) \[see Appendix\]. Removing the interaction term removed the multicollinearity between the predictors. Although one of the p-values for the interaction term between MaxPlayers and Category Exploration is statistically significant compared to the baseline Category Miniatures, all other interaction terms were not statistically significant. Since Model 3 is more parsimonious with lower VIFs than Model 2, and the difference in adjusted $R^2$ is negligible, we chose the third model to predict average board game rating.
+
+## Results
+
+**Model Assumptions**
+
+After checking model conditions (linearity, constant variance, normality, independence, and multicollinearity), we decided that while our data was not perfect, it was reasonable to proceed with mathematical inference \[see Appendix for supporting plots and Discussion for limitations\].
+
+**Understanding the Model**
+
+```{=tex}
+\begin{align*}
+\widehat{AvgRating} & = 6.913 + 0.165 * GameWeight \\
+  & - 0.011 * Rank - 0.011 * MaxPlayers \\
+  & - 0.228 * logNumOwned - 0.280 * Category\_Exploration \\
+  & - 0.219 * Category\_Print...Play - 0.293 * Category\_Puzzle \\
+  & - 0.342 * Category\_Card.Game - 0.051 * Theme\_SciFi \\
+  & - 0.158 * Theme\_Animals - 0.031 * Theme\_Fighting \\
+  & - 0.083 * Theme\_Economic \\
+\end{align*}
+```
+The intercept of 6.913 in the model represents the predicted average rating when a game has a GameWeight of 2.021, Rank of 10,047, MaxPlayers of 4.626, and logNumOwned of 6.21 and the board game is fantasy themed (baseline theme) in the Miniatures category (baseline category).
+
+The coefficients of the categorical predictors shift the intercept by their value when all other predictors are held constant. For example, when all of the predictor variables are held constant, the average rating of a board game is expected to decrease by 0.293 points when a board game's category changes from a Miniatures game (baseline category) to a Puzzle game. The fact that every categorical coefficient is negative suggests that a board game that belongs to Miniatures (baseline category) typically has the highest average rating. The p-values of the coefficients in every category are lower than the significance level of 0.05, providing sufficient evidence that they are all statistically significant relative to the baseline of Miniatures.
+
+However, the only theme with a p-value lower than 0.05 is Animals, meaning that only the Animals Theme is statistically significant relative to the baseline of Fantasy. This means that when a board game's theme changes from Fantasy to Animals, the average rating is expected to decrease by 0.158 points, holding all else constant.
+
+The coefficients of the quantitative predictors represent the expected change in the average rating of a board game for each unit increase in the predictor variables when all other predictors are held constant. For example, for every 1 point increase in the GameWeight of a board game, the expected average rating is expected to increase by 0.165 points, holding all else constant. Similarly, for every 1 unit increase in the log of the number of games owned, the expected average rating is expected to decrease by 0.228 points, holding all else constant. Rank is also negatively correlated with average rating due to a negative coefficient. The p-values for GameWeight, Rank, and logNumOwned are all approximately 0, which is less than the 0.05 threshold, so they are statistically significant predictors, while MaxPlayers is not. 
+
+**Model Performance**
+
+*RMSE and Adjusted* $R^2$ *for Model 3 (Chosen Model) on Testing Data*
+
+```{r}
+games_test_pred <- predict(games_fit3, games_test) |>
+  bind_cols(games_test)
+
+rmse(games_test_pred, truth = AvgRating, estimate = .pred) |>
+  kable(digits = 3)
+
+rsq(games_test_pred, truth = AvgRating, estimate = .pred) |>
+  kable(digits = 3)
+```
+
+Let's analyze performance metrics for Model 3 on our testing data. The $R^2$ is 0.430, suggesting that approximately 43.0% or nearly half of the variation in average board game ratings can be explained by the Category, Theme, logNumOwned, GameWeight, Rank, and MaxPlayers. When we break down our RMSE, the RMSE value of 0.681 means that the average distance between the actual and predicted values of the average rating is 0.681 points. Since average board game ratings have a range from 1-10, the average error of our chosen model is reasonable. The RMSE is not significantly higher on the testing data than on the training data, meaning the chosen model is not overfit (0.681 vs 0.637). 
+
+## Discussion
+
+**Implications**
+
+Our model displayed negative coefficients for non-baseline categories and themes, which indicate that games falling outside the fantasy-themed and miniatures category might have lower average ratings. Additionally, higher difficulty tends to improve average ratings while the log of the number of games owned and average rank tends to decrease average ratings.
+
+The negative correlation between logNumOwned and average rating in our model was unexpected, as we initially hypothesized that the increased popularity from a greater number of games owned would be correlated with higher ratings. This could be due to the fact that as the number of games owned increases, the number of raters follows accordingly, and the number of people that dislike the game may increase at a faster rate.
+
+In addition, while we hypothesized that games that are fighting-themed would have higher ratings, our model showed that games that are fantasy-themed tend to have higher average ratings. This tells us that the gaming community tends towards less violent games.
+
+Our analysis provides valuable insight for both board game enthusiasts and board game manufacturers. Game enthusiasts can use this information to guide what game to play since higher ratings are tied to overall enjoyment. Similarly, these findings can help game manufacturers enhance their game development strategies, improve their business models, and increase sales. Given our model, game enthusiasts and game manufacturers might consider purchasing and producing games that are more of a challenge (higher GameWeight) and focus on elements of miniatures and fantasy themes. The gaming community can also look towards board games with lower rankings and are owned less to get a better idea of a recommended game.
+
+**Limitations/Validity**
+
+One limitation of our model is that not all of the themes and categories are used, as only 5 are chosen for both, reducing the total number of observations that the model considers. Therefore, the predictions of the model are only generalizable to the themes and categories that are utilized in the model. Additionally, our selected model has an $R^2$ value of 0.494 on the training data and 0.430 on the testing data. Thus, our model does not explain most of the variability in the data. Making accurate inferences about the average rating of a board game would be difficult using our model. Lastly, when testing inference conditions on our selected model, the plots for linearity and constant variance were not ideal. In the residual vs. fitted plot, there appears to be a very slight fan shape, suggesting that constant variance may be violated. In the plot of the residuals vs. logNumOwned, the residuals looked slightly parabolic and in the plot of the residuals vs. Rank, the residuals looked slightly cubic. Since these conditions may not be satisfied, making inferences about the average ratings of board games may not be appropriate. In addition, since BGG ratings are voluntary, we are getting data from either lovers or haters, which may not be representative of the entire gaming population. However, we still believe the data provides a relatively good indication of a board game's rating.
+
+**Future Work/Improvements**
+
+Our model can be improved through the combination of different categories and themes which would create different interaction terms with the pre-existing predictors. This would alter the fit of the model to the data and may give better fits that would help the predictive performance and alter the decisions that game manufacturers and consumers make.
+
+Another improvement that we could make would be to add more data from games that are more recent or to find other game features from different datasets to merge into the pre-existing data. This would provide us with more predictors to utilize in our model that may increase the amount of variability explained by our model. One example would be price, as the cost of a game tends to play a large factor in whether people enjoy a game because if a game is too expensive, people may rate it lower even if they enjoyed it. 
+
+**Conclusion**
+
+In conclusion, while our model has a moderate fit and may not be generalizable to every board game, our findings provide general insight to consumers and game manufacturers on the optimal board game. So next time you're choosing a game, consider a difficult, fantasy-themed board game!
+
+## Appendix
+
+**Summary Statistics for Histogram of Log of Number of Games Owned**
+
+```{r}
+
+#summary stats for log(NumOwned)
+games |>
+  summarise(mean = mean(log(NumOwned)),
+            sd = sd(log(NumOwned)),
+            q0 = quantile(log(NumOwned), 0),
+            q25 = quantile(log(NumOwned), 0.25),
+            median = median(log(NumOwned)),
+            q75 = quantile(log(NumOwned), 0.75),
+            q100 = quantile(log(NumOwned), 1),
+            range = max(log(NumOwned)) - min(log(NumOwned))) |>
+  kable(digits = 3)
+
+```
+
+**Summary Statistics for Game Weight Histogram**
+
+```{r}
+games |>
+  summarise(mean = mean(GameWeight),
+            sd = sd(GameWeight),
+            q0 = quantile(GameWeight, 0),
+            q25 = quantile(GameWeight, 0.25),
+            median = median(GameWeight),
+            q75 = quantile(GameWeight, 0.75),
+            q100 = quantile(GameWeight, 1),
+            range = max(GameWeight) - min(GameWeight)) |>
+  kable(digits = 3)
+
+```
+
+**Correlation Matrix**
+
+```{r}
+games_num <- games |>
+  select(-c("BGGId", "Name", "YearPublished", "BayesAvgRating", "StdDev", "Theme", "Category"), -contains("Cat"), -contains("Thm"))
+
+corr_mat <- round(cor(games_num),1) 
+corrp.mat <- cor_pmat(games_num) 
+ggcorrplot(corr_mat, method ="square", lab=TRUE) +
+  theme(axis.text.x = element_text(size = 9), axis.text.y = element_text(size = 9))
+```
+
+*Average* $R^2$ *and RMSE across all 12 folds for Model 1*
+
+```{r}
+games_fit_rs1 <- games_wflow1 |>
+  fit_resamples(resamples = folds,
+                control = control_resamples(extract = calc_model_stats))
+
+collect_metrics(games_fit_rs1, summarize = TRUE) |>
+  select(-.config) |>
+  kable(digits = 3)
+```
+
+*Adjusted* $R^2$*, AIC, BIC across all 12 folds for Model 1*
+
+```{r}
+map_df(games_fit_rs1$.extracts, ~ .x[[1]][[1]]) |>
+  # pulling all the model fit stats
+  summarise(mean_adj_rsq = mean(adj.r.squared), 
+            mean_aic = mean(AIC), 
+            mean_bic = mean(BIC)) |>
+  kable(digits = 3)
+```
+
+*Average* $R^2$ *and RMSE across all 12 folds for Model 2*
+
+```{r}
+games_fit_rs2 <- games_wflow2 |>
+  fit_resamples(resamples = folds,
+                control = control_resamples(extract = calc_model_stats))
+
+collect_metrics(games_fit_rs2, summarize = TRUE) |>
+  select(-.config) |>
+  kable(digits = 3) 
+```
+
+*Adjusted* $R^2$*, AIC, BIC across all 12 folds for Model 2*
+
+```{r}
+map_df(games_fit_rs2$.extracts, ~ .x[[1]][[1]]) |>
+  # pulling all the model fit stats
+  summarise(mean_adj_rsq = mean(adj.r.squared), 
+            mean_aic = mean(AIC), 
+            mean_bic = mean(BIC)) |>
+  kable(digits = 3)
+```
+
+*Average* $R^2$ *and RMSE across all 12 folds for Model 3*
+
+```{r}
+games_fit_rs3 <- games_wflow3 |>
+  fit_resamples(resamples = folds,
+                control = control_resamples(extract = calc_model_stats))
+
+collect_metrics(games_fit_rs3, summarize = TRUE) |>
+  select(-.config) |>
+  kable(digits = 3)
+```
+
+*Adjusted* $R^2$*, AIC, BIC across all 12 folds for Model 3*
+
+```{r}
+map_df(games_fit_rs3$.extracts, ~ .x[[1]][[1]]) |>
+  # pulling all the model fit stats
+  summarise(mean_adj_rsq = mean(adj.r.squared), 
+            mean_aic = mean(AIC), 
+            mean_bic = mean(BIC)) |>
+  kable(digits = 3)
+```
+
+$R^2$ *and RMSE for Model 3 on Training Data*
+
+```{r}
+games_train_pred <- predict(games_fit3, games_train) |>
+  bind_cols(games_train)
+
+rmse(games_train_pred, truth = AvgRating, estimate = .pred) |>
+  kable(digits = 3)
+
+rsq(games_train_pred, truth = AvgRating, estimate = .pred) |>
+  kable(digits = 3)
+```
+
+**Model Conditions**
+
+*Linearity and Constant Variance*
+
+```{r}
+
+games_aug <- augment(games_fit3$fit$fit$fit)
+
+games_aug <- games_aug |>
+  mutate(Theme = case_when(Theme_SciFi == 1 ~ "SciFi",
+                           Theme_Fighting == 1 ~ "Fighting",
+                           Theme_Economic == 1 ~ "Economic",
+                           Theme_Animals == 1 ~ "Animals",
+                           TRUE ~ "Fantasy"))
+
+games_aug <- games_aug |>
+  mutate(Category = case_when(Category_Card.Game == 1 ~ "Card Game",
+                              Category_Exploration == 1 ~ "Exploration",
+                              Category_Puzzle == 1 ~ "Puzzle",
+                              Category_Print...Play == 1 ~ "Print & Play",
+                              TRUE ~ "Miniatures"))
+
+games_aug$Theme <- factor(games_aug$Theme, levels = c("Fantasy", "SciFi", "Animals", 
+                                              "Fighting", "Economic"))
+
+games_aug$Category <- factor(games_aug$Category, levels = c("Miniatures", "Exploration",
+                                                    "Print & Play", "Puzzle", 
+                                                    "Card Game"))
+
+mc_all <- ggplot(games_aug, aes(x = .fitted, y = .resid)) +
+   geom_point(alpha = 0.3) +
+   geom_hline(yintercept = 0, color = "blue") +
+   theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 8))
+
+mc_lno <- ggplot(games_aug, aes(x = logNumOwned, y = .resid)) +
+   geom_point(alpha = 0.3) +
+   geom_hline(yintercept = 0, color = "blue") +
+   theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 8))
+
+mc_rank <- ggplot(games_aug, aes(x = Rank, y = .resid)) +
+   geom_point(alpha = 0.3) +
+   geom_hline(yintercept = 0, color = "blue") +
+   theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 8))
+
+mc_gw <- ggplot(games_aug, aes(x = GameWeight, y = .resid)) +
+   geom_point(alpha = 0.3) +
+   geom_hline(yintercept = 0, color = "blue") +
+   theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 8))
+
+mc_mp <- ggplot(games_aug, aes(x = MaxPlayers, y = .resid)) +
+   geom_point(alpha = 0.3) +
+   geom_hline(yintercept = 0, color = "blue") +
+   theme(axis.text.x = element_text(size = 8), axis.text.y = element_text(size = 8))
+
+mc_cat <- ggplot(games_aug, aes(x = Category, y = .resid)) +
+   geom_point(alpha = 0.3) +
+   geom_hline(yintercept = 0, color = "blue") +
+   theme(axis.text.x = element_text(size = 7), axis.text.y = element_text(size = 7))
+
+mc_thm <- ggplot(games_aug, aes(x = Theme, y = .resid)) +
+   geom_point(alpha = 0.3) +
+   geom_hline(yintercept = 0, color = "blue") +
+   theme(axis.text.x = element_text(size = 7), axis.text.y = element_text(size = 7))
+
+(mc_all | mc_lno | mc_rank) /
+(mc_gw | mc_mp) /
+(mc_cat | mc_thm)
+```
+
+*Normality*
+
+```{r}
+games_aug |>
+  ggplot(aes(x = .resid)) +
+  geom_histogram() +
+  labs(x = "Residuals", y = "Count", 
+       title = "Distribution of Residuals")
+```
+
+*Independence*
+
+We have no reason to believe that the qualities of one board game affect the qualities of another board game. Data was collected from one time period, and we controlled for potential clusters such as category in our model. Hence, independence is satisfied.
+
+*Multicollinearity*
+
+**VIF:** We looked at the VIF of the 2nd and 3rd model to measure the multicollinearity between the predictors.
+
+```{r}
+#| eval: true
+games_fit_model <- extract_fit_parsnip(games_fit2)
+vif(games_fit_model$fit) |>
+  kable(digits = 3)
+
+games_fit_model <- extract_fit_parsnip(games_fit3)
+vif(games_fit_model$fit) |>
+  kable(digits = 3)
+```
